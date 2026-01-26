@@ -2,8 +2,9 @@
 Memory Management for Agent System
 ===================================
 
-Handles session memory storage using dual-layer approach:
+Handles session memory storage using multi-layer approach:
 - PRIMARY: Graphiti (when enabled) - semantic search, cross-session context
+- SECONDARY: vector-memory-mcp (when enabled) - local embeddings, no API keys required
 - FALLBACK: File-based memory - zero dependencies, always available
 """
 
@@ -21,6 +22,16 @@ from debug import (
     is_debug_enabled,
 )
 from graphiti_config import get_graphiti_status, is_graphiti_enabled
+from integrations.vector_memory.adapter import (
+    get_initialized_adapter as get_vector_memory_adapter,
+    is_vector_memory_enabled,
+)
+from memory_config import (
+    MemoryBackend,
+    get_fallback_order,
+    get_memory_backend,
+    is_backend_enabled,
+)
 
 # Import from parent memory package
 # Now safe since this module is named memory_manager (not memory)
@@ -267,7 +278,8 @@ async def save_session_memory(
 
     Memory Strategy:
     - PRIMARY: Graphiti (when enabled) - provides semantic search, cross-session context
-    - FALLBACK: File-based (when Graphiti is disabled) - zero dependencies, always works
+    - SECONDARY: vector-memory (when enabled) - local embeddings, no API keys required
+    - FALLBACK: File-based (when both are disabled or fail) - zero dependencies, always works
 
     This is called after each session to persist learnings.
 
@@ -281,7 +293,7 @@ async def save_session_memory(
         discoveries: Optional dict with file discoveries, patterns, gotchas
 
     Returns:
-        Tuple of (success, storage_type) where storage_type is "graphiti" or "file"
+        Tuple of (success, storage_type) where storage_type is "graphiti", "vector_memory", or "file"
     """
     # Debug: Log memory save start
     if is_debug_enabled():
@@ -423,9 +435,89 @@ async def save_session_memory(
                     )
     else:
         if is_debug_enabled():
-            debug("memory", "Graphiti not enabled, skipping to FALLBACK")
+            debug("memory", "Graphiti not enabled, skipping to SECONDARY")
 
-    # FALLBACK: File-based memory (when Graphiti is disabled or fails)
+    # SECONDARY: Try vector-memory if enabled (when Graphiti is disabled or fails)
+    vector_memory_enabled = is_vector_memory_enabled()
+    if is_debug_enabled():
+        debug(
+            "memory",
+            "Vector-memory status check",
+            enabled=vector_memory_enabled,
+        )
+
+    if vector_memory_enabled:
+        if is_debug_enabled():
+            debug("memory", "Attempting SECONDARY storage: vector-memory")
+
+        adapter = None
+        try:
+            # Get initialized vector memory adapter
+            adapter = await get_vector_memory_adapter(spec_dir, project_dir)
+            if adapter is None:
+                if is_debug_enabled():
+                    debug_warning("memory", "VectorMemoryAdapter not available")
+            elif adapter.is_enabled:
+                if is_debug_enabled():
+                    debug("memory", "Saving to vector-memory...")
+
+                result = await adapter.save_session_insights(session_num, insights)
+
+                if result:
+                    logger.info(
+                        f"Session {session_num} insights saved to vector-memory (secondary)"
+                    )
+                    if is_debug_enabled():
+                        debug_success(
+                            "memory",
+                            f"Session {session_num} saved to vector-memory (SECONDARY)",
+                            storage_type="vector_memory",
+                            subtasks_saved=len(subtasks_completed),
+                        )
+                    return True, "vector_memory"
+                else:
+                    logger.warning(
+                        "vector-memory save returned False, falling back to file-based"
+                    )
+                    if is_debug_enabled():
+                        debug_warning(
+                            "memory", "vector-memory save returned False, using FALLBACK"
+                        )
+            else:
+                if is_debug_enabled():
+                    debug_warning(
+                        "memory", "VectorMemoryAdapter disabled, using FALLBACK"
+                    )
+
+        except Exception as e:
+            logger.warning(f"vector-memory save failed: {e}, falling back to file-based")
+            if is_debug_enabled():
+                debug_error("memory", "vector-memory save failed", error=str(e))
+            # Capture exception to Sentry with full context
+            capture_exception(
+                e,
+                operation="save_session_memory_vector_memory",
+                subtask_id=subtask_id,
+                session_num=session_num,
+                success=success,
+                subtasks_completed=subtasks_completed,
+                spec_dir=str(spec_dir),
+                project_dir=str(project_dir),
+            )
+        finally:
+            # Always close the adapter connection (swallow exceptions to avoid overriding)
+            if adapter is not None:
+                try:
+                    await adapter.close()
+                except Exception as e:
+                    logger.debug(
+                        "Failed to close vector-memory adapter connection", exc_info=e
+                    )
+    else:
+        if is_debug_enabled():
+            debug("memory", "vector-memory not enabled, skipping to FALLBACK")
+
+    # FALLBACK: File-based memory (when Graphiti and vector-memory are disabled or fail)
     if is_debug_enabled():
         debug("memory", "Attempting FALLBACK storage: File-based")
 
