@@ -418,6 +418,36 @@ def get_electron_debug_port() -> int:
     return int(os.environ.get("ELECTRON_DEBUG_PORT", "9222"))
 
 
+def is_vector_memory_enabled() -> bool:
+    """
+    Check if vector-memory MCP server integration is enabled.
+
+    Requires VECTOR_MEMORY_ENABLED to be set to 'true'.
+    This provides an alternative memory backend to Graphiti that uses local
+    sentence-transformers for embeddings, enabling fully offline operation
+    without any API key requirements.
+    """
+    return os.environ.get("VECTOR_MEMORY_ENABLED", "").lower() == "true"
+
+
+def get_vector_memory_url() -> str | None:
+    """
+    Get the vector-memory MCP server URL for Docker mode.
+
+    Returns None if not set, indicating npx mode should be used instead.
+    """
+    return os.environ.get("VECTOR_MEMORY_URL")
+
+
+def is_vector_memory_docker_mode() -> bool:
+    """
+    Check if vector-memory should run in Docker mode (HTTP) vs npx mode (command).
+
+    Docker mode is used when VECTOR_MEMORY_URL is set.
+    """
+    return bool(get_vector_memory_url())
+
+
 def should_use_claude_md() -> bool:
     """Check if CLAUDE.md instructions should be included in system prompt."""
     return os.environ.get("USE_CLAUDE_MD", "").lower() == "true"
