@@ -79,6 +79,18 @@ GRAPHITI_MCP_TOOLS = [
     "mcp__graphiti-memory__get_entity_edge",  # Get specific entity/relationship
 ]
 
+# Vector-memory MCP tools for local vector-based memory (when VECTOR_MEMORY_ENABLED is set)
+# Alternative to Graphiti that uses local embeddings via sentence-transformers.
+# Enables fully offline operation without cloud API keys.
+# See: https://github.com/weslien/vector-memory-mcp
+VECTOR_MEMORY_TOOLS = [
+    "mcp__vector-memory__store",  # Store a memory with text and metadata
+    "mcp__vector-memory__retrieve",  # Retrieve memories via semantic search
+    "mcp__vector-memory__search",  # Search memories by text query
+    "mcp__vector-memory__list",  # List all stored memories
+    "mcp__vector-memory__delete",  # Delete a memory by ID
+]
+
 # =============================================================================
 # Browser Automation MCP Tools (QA agents only)
 # =============================================================================
