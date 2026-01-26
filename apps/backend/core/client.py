@@ -131,6 +131,7 @@ from agents.tools_pkg import (
     GRAPHITI_MCP_TOOLS,
     LINEAR_TOOLS,
     PUPPETEER_TOOLS,
+    VECTOR_MEMORY_TOOLS,
     create_auto_claude_mcp_server,
     get_allowed_tools,
     get_required_mcp_servers,
@@ -578,6 +579,9 @@ def create_client(
     # Check if Graphiti MCP is enabled (already filtered by get_required_mcp_servers)
     graphiti_mcp_enabled = "graphiti" in required_servers
 
+    # Check if vector-memory MCP is enabled (alternative to Graphiti)
+    vector_memory_enabled = "vector-memory" in required_servers and is_vector_memory_enabled()
+
     # Determine browser tools for permissions (already in allowed_tools_list)
     browser_tools_permissions = []
     if "electron" in required_servers:
@@ -680,6 +684,11 @@ def create_client(
                     if graphiti_mcp_enabled
                     else []
                 ),
+                *(
+                    [f"{tool}(*)" for tool in VECTOR_MEMORY_TOOLS]
+                    if vector_memory_enabled
+                    else []
+                ),
                 *[f"{tool}(*)" for tool in browser_tools_permissions],
             ],
         },
@@ -715,6 +724,8 @@ def create_client(
         mcp_servers_list.append("linear (project management)")
     if graphiti_mcp_enabled:
         mcp_servers_list.append("graphiti-memory (knowledge graph)")
+    if vector_memory_enabled:
+        mcp_servers_list.append("vector-memory (local embeddings)")
     if "auto-claude" in required_servers and auto_claude_tools_enabled:
         mcp_servers_list.append(f"auto-claude ({agent_type} tools)")
     if mcp_servers_list:
@@ -770,6 +781,22 @@ def create_client(
             "type": "http",
             "url": get_graphiti_mcp_url(),
         }
+
+    # Vector-memory MCP server for local vector-based memory
+    # Alternative to Graphiti that uses local embeddings via sentence-transformers
+    if vector_memory_enabled:
+        if is_vector_memory_docker_mode():
+            # Docker mode: connect via HTTP URL
+            mcp_servers["vector-memory"] = {
+                "type": "http",
+                "url": get_vector_memory_url(),
+            }
+        else:
+            # npx mode: run locally via command
+            mcp_servers["vector-memory"] = {
+                "command": "npx",
+                "args": ["-y", "@weslien/vector-memory-mcp", "--working-dir", str(project_dir)],
+            }
 
     # Add custom auto-claude MCP server if required and available
     if "auto-claude" in required_servers and auto_claude_tools_enabled:
