@@ -385,6 +385,7 @@ def _map_mcp_server_name(
         "context7": "context7",
         "graphiti-memory": "graphiti",
         "graphiti": "graphiti",
+        "vector-memory": "vector-memory",
         "linear": "linear",
         "electron": "electron",
         "puppeteer": "puppeteer",
