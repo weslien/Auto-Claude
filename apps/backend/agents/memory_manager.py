@@ -100,10 +100,15 @@ async def get_graphiti_context(
     subtask: dict,
 ) -> str | None:
     """
-    Retrieve relevant context from Graphiti for the current subtask.
+    Retrieve relevant context from memory for the current subtask.
 
-    This searches the knowledge graph for context relevant to the subtask's
+    This searches the memory backend for context relevant to the subtask's
     task description, returning past insights, patterns, and gotchas.
+
+    Memory Strategy:
+    - PRIMARY: Graphiti (when enabled) - semantic search, cross-session context
+    - SECONDARY: vector-memory (when enabled) - local embeddings, no API keys required
+    - FALLBACK: Return None (no context available)
 
     Args:
         spec_dir: Spec directory
@@ -116,16 +121,69 @@ async def get_graphiti_context(
     if is_debug_enabled():
         debug(
             "memory",
-            "Retrieving Graphiti context for subtask",
+            "Retrieving memory context for subtask",
             subtask_id=subtask.get("id", "unknown"),
             subtask_desc=subtask.get("description", "")[:100],
         )
 
-    if not is_graphiti_enabled():
+    # Build search query from subtask description
+    subtask_desc = subtask.get("description", "")
+    subtask_id = subtask.get("id", "")
+    query = f"{subtask_desc} {subtask_id}".strip()
+
+    if not query:
         if is_debug_enabled():
-            debug("memory", "Graphiti not enabled, skipping context retrieval")
+            debug_warning("memory", "Empty query, skipping context retrieval")
         return None
 
+    # PRIMARY: Try Graphiti if enabled
+    if is_graphiti_enabled():
+        if is_debug_enabled():
+            debug("memory", "Attempting PRIMARY context retrieval: Graphiti")
+
+        context = await _get_graphiti_context_internal(spec_dir, project_dir, query)
+        if context is not None:
+            return context
+
+        if is_debug_enabled():
+            debug("memory", "Graphiti context retrieval failed or empty, trying SECONDARY")
+
+    # SECONDARY: Try vector-memory if enabled
+    vector_memory_enabled = is_vector_memory_enabled()
+    if vector_memory_enabled:
+        if is_debug_enabled():
+            debug("memory", "Attempting SECONDARY context retrieval: vector-memory")
+
+        context = await _get_vector_memory_context_internal(spec_dir, project_dir, query)
+        if context is not None:
+            return context
+
+        if is_debug_enabled():
+            debug("memory", "vector-memory context retrieval failed or empty")
+
+    # No context available from any backend
+    if is_debug_enabled():
+        debug("memory", "No memory context available from any backend")
+
+    return None
+
+
+async def _get_graphiti_context_internal(
+    spec_dir: Path,
+    project_dir: Path,
+    query: str,
+) -> str | None:
+    """
+    Internal function to retrieve context from Graphiti.
+
+    Args:
+        spec_dir: Spec directory
+        project_dir: Project root directory
+        query: Search query
+
+    Returns:
+        Formatted context string or None if unavailable
+    """
     memory = None
     try:
         # Use centralized helper for GraphitiMemory instantiation (async)
@@ -135,16 +193,6 @@ async def get_graphiti_context(
                 debug_warning(
                     "memory", "GraphitiMemory not available for context retrieval"
                 )
-            return None
-
-        # Build search query from subtask description
-        subtask_desc = subtask.get("description", "")
-        subtask_id = subtask.get("id", "")
-        query = f"{subtask_desc} {subtask_id}".strip()
-
-        if not query:
-            if is_debug_enabled():
-                debug_warning("memory", "Empty query, skipping context retrieval")
             return None
 
         if is_debug_enabled():
@@ -246,9 +294,8 @@ async def get_graphiti_context(
         # Capture exception to Sentry with full context
         capture_exception(
             e,
-            operation="get_graphiti_context",
-            subtask_id=subtask.get("id", "unknown"),
-            subtask_desc=subtask.get("description", "")[:200],
+            operation="_get_graphiti_context_internal",
+            query=query[:200],
             spec_dir=str(spec_dir),
             project_dir=str(project_dir),
         )
@@ -261,6 +308,158 @@ async def get_graphiti_context(
             except Exception as e:
                 logger.debug(
                     "Failed to close Graphiti memory connection", exc_info=True
+                )
+
+
+async def _get_vector_memory_context_internal(
+    spec_dir: Path,
+    project_dir: Path,
+    query: str,
+) -> str | None:
+    """
+    Internal function to retrieve context from vector-memory.
+
+    Args:
+        spec_dir: Spec directory
+        project_dir: Project root directory
+        query: Search query
+
+    Returns:
+        Formatted context string or None if unavailable
+    """
+    adapter = None
+    try:
+        # Get initialized vector memory adapter
+        adapter = await get_vector_memory_adapter(spec_dir, project_dir)
+        if adapter is None:
+            if is_debug_enabled():
+                debug_warning(
+                    "memory", "VectorMemoryAdapter not available for context retrieval"
+                )
+            return None
+
+        if not adapter.is_enabled:
+            if is_debug_enabled():
+                debug_warning("memory", "VectorMemoryAdapter disabled")
+            return None
+
+        if is_debug_enabled():
+            debug_detailed(
+                "memory",
+                "Searching vector-memory",
+                query=query[:200],
+                num_results=5,
+            )
+
+        # Get relevant context
+        context_items = await adapter.get_relevant_context(query, num_results=5)
+
+        # Get patterns and gotchas
+        patterns, gotchas = await adapter.get_patterns_and_gotchas(
+            query, num_results=3, min_score=0.5
+        )
+
+        # Also get recent session history
+        session_history = await adapter.get_session_history(limit=3)
+
+        if is_debug_enabled():
+            debug(
+                "memory",
+                "vector-memory context retrieval complete",
+                context_items_found=len(context_items) if context_items else 0,
+                patterns_found=len(patterns) if patterns else 0,
+                gotchas_found=len(gotchas) if gotchas else 0,
+                session_history_found=len(session_history) if session_history else 0,
+            )
+
+        if not context_items and not session_history and not patterns and not gotchas:
+            if is_debug_enabled():
+                debug("memory", "No relevant context found in vector-memory")
+            return None
+
+        # Format the context (similar to Graphiti format for consistency)
+        sections = ["## Vector Memory Context\n"]
+        sections.append("_Retrieved from local embeddings for this subtask:_\n")
+
+        if context_items:
+            sections.append("### Relevant Knowledge\n")
+            for item in context_items:
+                content = item.get("content", "")[:500]  # Truncate
+                item_type = item.get("type", "unknown")
+                sections.append(f"- **[{item_type}]** {content}\n")
+
+        # Add patterns section (cross-session learning)
+        if patterns:
+            sections.append("### Learned Patterns\n")
+            sections.append("_Patterns discovered in previous sessions:_\n")
+            for p in patterns:
+                pattern_text = p.get("pattern", "")
+                applies_to = p.get("applies_to", "")
+                if applies_to:
+                    sections.append(
+                        f"- **Pattern**: {pattern_text}\n  _Applies to:_ {applies_to}\n"
+                    )
+                else:
+                    sections.append(f"- **Pattern**: {pattern_text}\n")
+
+        # Add gotchas section (cross-session learning)
+        if gotchas:
+            sections.append("### Known Gotchas\n")
+            sections.append("_Pitfalls to avoid:_\n")
+            for g in gotchas:
+                gotcha_text = g.get("gotcha", "")
+                solution = g.get("solution", "")
+                if solution:
+                    sections.append(
+                        f"- **Gotcha**: {gotcha_text}\n  _Solution:_ {solution}\n"
+                    )
+                else:
+                    sections.append(f"- **Gotcha**: {gotcha_text}\n")
+
+        if session_history:
+            sections.append("### Recent Session Insights\n")
+            for session in session_history[:2]:  # Only show last 2
+                session_num = session.get("session_number", "?")
+                content = session.get("content", "")
+                recommendations = session.get("recommendations_for_next_session", [])
+                if recommendations:
+                    sections.append(f"**Session {session_num} recommendations:**")
+                    for rec in recommendations[:3]:  # Limit to 3
+                        sections.append(f"- {rec}")
+                    sections.append("")
+                elif content:
+                    sections.append(f"**Session {session_num}:**")
+                    sections.append(f"- {content[:200]}")
+                    sections.append("")
+
+        if is_debug_enabled():
+            debug_success(
+                "memory", "vector-memory context formatted", total_sections=len(sections)
+            )
+
+        return "\n".join(sections)
+
+    except Exception as e:
+        logger.warning(f"Failed to get vector-memory context: {e}")
+        if is_debug_enabled():
+            debug_error("memory", "vector-memory context retrieval failed", error=str(e))
+        # Capture exception to Sentry with full context
+        capture_exception(
+            e,
+            operation="_get_vector_memory_context_internal",
+            query=query[:200],
+            spec_dir=str(spec_dir),
+            project_dir=str(project_dir),
+        )
+        return None
+    finally:
+        # Always close the adapter connection (swallow exceptions to avoid overriding)
+        if adapter is not None:
+            try:
+                await adapter.close()
+            except Exception as e:
+                logger.debug(
+                    "Failed to close vector-memory adapter connection", exc_info=True
                 )
 
 
